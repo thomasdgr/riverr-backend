@@ -1,0 +1,9 @@
+fastapi==0.95.1
+httpx==0.23.3
+pydantic==1.8.2
+pytest==7.2.1
+starlette==0.26.1
+uvicorn==0.20.0
+cinemagoer==2023.5.1
+
+# use "pipreqs" to build dependencies file
