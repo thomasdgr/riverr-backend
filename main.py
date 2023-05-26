@@ -35,8 +35,8 @@ DELUGE_URL = f"http://{LOCAL_IP}:8112/json"
 DELUGE_KEY = os.getenv("DELUGE_KEY")
 
 JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers"
+# f"http://{LOCAL_IP}:9117/api/v2.0/indexers/all/results/torznab" ??
 JACKETT_KEY = os.getenv("JACKETT_KEY")
-
 
 # *****************************************************************************
 #                  FastAPI entry point declaration
@@ -106,9 +106,15 @@ def info():
 
 # *****************************************************************************
 #                  Radarr routes
-# 
+#
+#   - Get la liste des films watched                        OK
+#   - Get la liste des films recommandés                    OK
+#   - Get la liste de résultat d'une recherche de films     OK
+#   - Ajouter un film à la liste des watch                  OK
+#   - Retirer un film de la liste des watch                 TEST
 
-@app.get("/getmovies") # curl -X GET "http://localhost:3000/getmovies"
+# curl -X GET "http://localhost:3000/getmovies"
+@app.get("/getmovies")
 async def get_radarr_movies():
     try:
         async with httpx.AsyncClient() as client:
@@ -135,7 +141,8 @@ async def get_radarr_movies():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/recomovies") # curl -X GET "http://localhost:3000/recomovies"
+# curl -X GET "http://localhost:3000/recomovies"
+@app.get("/recomovies")
 async def discover_radarr_movies():
     try:
         async with httpx.AsyncClient() as client:
@@ -169,12 +176,13 @@ async def discover_radarr_movies():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/searchmovies") # curl -X GET "http://localhost:3000/searchmovies?query=Avengers"
-async def search_radarr_movies(query: str):
+# curl -X GET -d '{"title":"Avengers"}' "http://localhost:3000/searchmovies"
+@app.get("/searchmovies")
+async def search_radarr_movies(title: str):
     try:
         async with httpx.AsyncClient() as client:
             head = {"X-Api-Key": RADARR_KEY}
-            params = {"term": query}
+            params = {"term": title}
             response = await client.get(f"{RADARR_URL}/movie/lookup", 
                                         headers=head, params=params)
             response.raise_for_status()
@@ -199,7 +207,8 @@ async def search_radarr_movies(query: str):
     except Exception as e:
         return {"error": str(e)}
 
-@app.post("/addmovies") # curl -X POST "http://localhost:3000/addmovies?title=Gladiator"
+# curl -X POST -d '{"title":"Gladiator"}' "http://localhost:3000/addmovies"
+@app.post("/addmovies")
 async def add_radarr_movies(title: str):
     try:
         async with httpx.AsyncClient() as client:
@@ -230,7 +239,8 @@ async def add_radarr_movies(title: str):
     except Exception as e:
         return {"error": str(e)}
 
-@app.delete("/removemovies") # TODO: TEST WITH curl -X DELETE "http://localhost:3000/removemovies?title=Gladiator"
+# TODO: TEST WITH curl -X DELETE -d '{"title":"Gladiator"}' "http://localhost:3000/removemovies"
+@app.delete("/removemovies")
 async def remove_radar_movies_from_watch_list(title: str):
     try:
         async with httpx.AsyncClient() as client:
@@ -260,8 +270,14 @@ async def remove_radar_movies_from_watch_list(title: str):
 # *****************************************************************************
 #                  Sonarr routes
 # 
+#   - Get la liste des séries watched                       OK
+#   - Get la liste des séries recommandés                   NOK
+#   - Get la liste de résultat d'une recherche de séries    OK
+#   - Ajouter une séries à la liste des watch               ALMOST
+#   - Retirer une séries de la liste des watch              TEST
 
-@app.get("/gettv") # curl -X GET "http://localhost:3000/gettv"
+# curl -X GET "http://localhost:3000/gettv"
+@app.get("/gettv")
 async def get_sonarr_series():
     try:
         async with httpx.AsyncClient() as client:
@@ -290,7 +306,8 @@ async def get_sonarr_series():
         return {"error": str(e)}
 
 # TODO: Fix the issue where no recommendations are found for tv
-@app.get("/recotv") # curl -X GET "http://localhost:3000/recotv"
+# curl -X GET "http://localhost:3000/recotv"
+@app.get("/recotv")
 async def discover_sonarr_series():
     try:
         async with httpx.AsyncClient() as client:
@@ -324,12 +341,13 @@ async def discover_sonarr_series():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/searchtv") # curl -X GET "http://localhost:3000/searchtv?query=Breaking_Bad"
-async def search_sonarr_series(query: str):
+# curl -X GET -d '{"title":"Breaking Bad"}' "http://localhost:3000/searchtv"
+@app.get("/searchtv")
+async def search_sonarr_series(title: str):
     try:
         async with httpx.AsyncClient() as client:
             head = {"X-Api-Key": SONARR_KEY}
-            params = {"term": query}
+            params = {"term": title}
             response = await client.get(f"{SONARR_URL}/series/lookup", 
                                         headers=head, params=params)
             response.raise_for_status()
@@ -353,8 +371,10 @@ async def search_sonarr_series(query: str):
         return {"error": f"Failed to decode JSON: {str(e)}"}
     except Exception as e:
         return {"error": str(e)}
+    pass
 
-@app.post("/addtv")  # curl -X POST "http://localhost:3000/addtv?title=Friends"
+# curl -X POST -d '{"title":"Friends"}' "http://localhost:3000/addtv"
+@app.post("/addtv") 
 async def add_sonarr_series(title: str, year: int):
     try:
         async with httpx.AsyncClient() as client:
@@ -400,7 +420,8 @@ async def add_sonarr_series(title: str, year: int):
     except Exception as e:
         return {"error": str(e)}
 
-@app.delete("/removeseries") # TODO: TEST WITH curl -X DELETE "http://localhost:3000/removeseries?title=Friends"
+# TODO: TEST WITH curl -X DELETE -d '{"title":"Friends"}' http://localhost:8000/removeseries
+@app.delete("/removeseries")
 async def remove_sonarr_series_from_watch_list(title: str):
     try:
         async with httpx.AsyncClient() as client:
@@ -430,31 +451,38 @@ async def remove_sonarr_series_from_watch_list(title: str):
 # *****************************************************************************
 #                  Deluge routes
 # 
+#   - Get les torrents et leurs états                       TEST
+#   - Modifier l'état d'un torrent ( pause, delete)         TEST
+#   - Ajouter un torrent depuis un lien magnet              TEST
 
+# TODO: TEST WITH curl -X GET http://localhost:8000/gettorrents
 @app.get("/gettorrents")
-async def get_torrents():
+async def get_deluge_torrents():
     torrent_ids = await deluge_rpc("web.update_ui", [["id"], {}])
     torrent_lst = [{"id": torrent_id} for torrent_id in torrent_ids]
     torrents = await deluge_rpc("web.get_torrents_status", [torrent_lst, {}])
     return torrents
 
-@app.get("/torrents/{torrent_id}/pause")
-async def pause_torrent(torrent_id: str):
+# TODO: TEST WITH curl -X GET http://localhost:8000/gettrackers
+@app.get("/pausetorrents/{torrent_id}")
+async def pause_deluge_torrent(torrent_id: str):
     result = await deluge_rpc("core.pause_torrent", [[torrent_id]])
     if not result:
         raise Exception("Failed to pause torrent")
     return {"status": "success"}
 
-@app.get("/torrents/{torrent_id}/delete")
-async def delete_torrent(torrent_id: str):
-    # Remove with data = False. Change it to True if you want to remove data as well.
+# TODO: TEST WITH curl -X DELETE -d '{"torrent_id":"..."}' http://localhost:8000/removetorrents
+@app.delete("/removetorrents")
+async def delete_deluge_torrent(torrent_id: str):
+    # Remove with data = False. Change it to True to remove data as well.
     result = await deluge_rpc("core.remove_torrent", [torrent_id, False])  
     if not result:
-        raise Exception("Failed to delete torrent")
+        raise HTTPException(status_code=400, detail="Failed to delete torrent")
     return {"status": "success"}
 
-@app.post("/torrents")
-async def add_torrent(magnet_link: str):
+# TODO: TEST WITH curl -X GET http://localhost:8000/gettrackers
+@app.post("/addtorrents")
+async def add_deluge_torrent(magnet_link: str):
     result = await deluge_rpc("core.add_torrent_magnet", [magnet_link, {}])
     if not result:
         raise HTTPException(status_code=400, detail="Failed to add torrent")
@@ -462,13 +490,15 @@ async def add_torrent(magnet_link: str):
 
 # *****************************************************************************
 #                  Jackett routes
-# 
+#  
+#   - Get la liste des trackers                             TEST
+#   - Modifier l'url d'un tracker                           IMPOSSIBLE
 
-@app.get("/jackett/trackers")
-async def get_trackers():
-    data = await jackett_rpc(JACKETT_API_URL)
+# TODO: TEST WITH curl -X GET http://localhost:8000/gettrackers
+@app.get("/gettrackers")
+async def get_jackett_trackers():
+    data = await jackett_rpc(JACKETT_API_URL, JACKETT_KEY)
     return [tracker['id'] for tracker in data]
-
 
 # *****************************************************************************
 #                  Utility functions
@@ -613,30 +643,11 @@ async def deluge_rpc(method, params=None):
                 raise Exception(f"Deluge RPC Error: {data['error']['message']}")
     return None
 
-async def jackett_rpc(url: str) -> Dict[str, Any]:
+async def jackett_rpc(url: str, api_key: str) -> Dict[str, Any]:
+    headers = {"X-Api-Key": api_key}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=response.status, 
+                                    detail="Failed to fetch data from Jackett")
             return await response.json()
-
-# Routes Films
- # OK - Get la liste des films watched
- # OK - Get la liste des films recommandés
- # OK - Get la liste de résultat d'une recherche de films
- # OK - Ajouter un film à la liste des watch
- # TESTER - Retirer un film de la liste des watch
-
-# Routes Series
- # OK - Get la liste des séries watched
- # MARCHE PAS - Get la liste des séries recommandés
- # OK - Get la liste de résultat d'une recherche de séries 
- # PRESQUE - Ajouter une séries à la liste des watch
- # TESTER - Retirer une séries de la liste des watch
-
-# Route deluge
- # TESTER - Get les torrents et leurs états
- # TESTER - Modifier l'état d'un torrent (On va dire juste pause, delete)
- # TESTER - Ajouter un torrent depuis un lien magnet
-
-# Route jackett
- # TESTER - Get la liste des trackers
- # VISIBLEMENT C'EST PAS POSSIBLE - Modifier l'url d'un tracker ?
