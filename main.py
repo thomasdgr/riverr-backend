@@ -1,14 +1,13 @@
 import os
 import json
 import httpx
+import aiohttp
 import logging
 
-from fastapi import FastAPI
+from typing import Any, Dict
+from fastapi import FastAPI, HTTPException
 from fastapi.openapi.utils import get_openapi
-from starlette.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, conint
-from starlette.responses import JSONResponse
 
 # *****************************************************************************
 #                  Some general constants and variables
@@ -31,6 +30,13 @@ SONARR_KEY = os.getenv("SONARR_KEY")
 TMDB_URL = "https://api.themoviedb.org/3"
 TMDB_KEY = os.getenv("TMDB_KEY")
 TMDB_POSTER_URL = "https://image.tmdb.org/t/p/original"
+
+DELUGE_URL = f"http://{LOCAL_IP}:8112/json"
+DELUGE_KEY = os.getenv("DELUGE_KEY")
+
+JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers"
+JACKETT_KEY = os.getenv("JACKETT_KEY")
+
 
 # *****************************************************************************
 #                  FastAPI entry point declaration
@@ -89,27 +95,33 @@ class Media:
 # *****************************************************************************
 
 @app.on_event("startup")
-def startup_event():
-    pass
-    
+async def startup_event():
+    result = await deluge_rpc("auth.login", DELUGE_KEY)
+    if not result:
+        raise Exception("Failed to authenticate to Deluge server")
+
 @app.get("/")
 def info():
     return {'message': 'Welcome to the Riverr API.'}
 
-@app.get("/getmovies")
+# *****************************************************************************
+#                  Radarr routes
+# 
+
+@app.get("/getmovies") # curl -X GET "http://localhost:3000/getmovies"
 async def get_radarr_movies():
     try:
         async with httpx.AsyncClient() as client:
             head = {"X-Api-Key": RADARR_KEY}
             response = await client.get(f"{RADARR_URL}/movie", headers=head)
             response.raise_for_status()
-            movies_data = response.json()
-            movies = [Media(str(m["title"]), 
-                            str(m["overview"]), 
-                            str(m["ratings"]["imdb"]["value"]), 
-                            str(convert_runtime(m["runtime"])), 
-                            str(retrieve_poster_url(m["images"])), 
-                            str(m["year"])).to_dict() for m in movies_data]
+            m_data = response.json()
+            movies = [Media(str(get_title(m)), 
+                            str(get_overview(m)), 
+                            str(get_rating(m["ratings"])), 
+                            str(get_runtime(m["runtime"])), 
+                            str(get_poster_url(m["images"])), 
+                            str(get_year(m))).to_dict() for m in m_data]
             if not movies:
                 return {"warning": "No movies found"}
             return movies
@@ -123,55 +135,27 @@ async def get_radarr_movies():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/gettv")
-async def get_sonarr_series():
-    try:
-        async with httpx.AsyncClient() as client:
-            head = {"X-Api-Key": SONARR_KEY}
-            response = await client.get(f"{SONARR_URL}/series", headers=head)
-            response.raise_for_status()
-            series_data = response.json()
-            series = [Media(str(s["title"]), 
-                            str(s["overview"]), 
-                            str(s["ratings"]["value"]), 
-                            str(s["statistics"]["episodeCount"]),
-                            str(retrieve_poster_url(s["images"])), 
-                            str(s["year"])
-                        ).to_dict() for s in series_data]
-            if not series:
-                return {"warning": "No series found"}
-            return series
-    except httpx.HTTPError as e:
-        if e.response.status_code == 404:
-            return {"warning": "Route not found"}
-        else:
-            return {"error": str(e)}
-    except json.JSONDecodeError as e:
-        return {"error": f"Failed to decode JSON: {str(e)}"}
-    except Exception as e:
-        return {"error": str(e)}
-    
-@app.get("/getmovies-reco") # TODO: Fix the issue where no length are found for movies
+@app.get("/recomovies") # curl -X GET "http://localhost:3000/recomovies"
 async def discover_radarr_movies():
     try:
         async with httpx.AsyncClient() as client:
             head = {"X-Api-Key": RADARR_KEY}
             response = await client.get(f"{RADARR_URL}/movie", headers=head)
             response.raise_for_status()
-            movies_data = response.json()
-            genre = retrieve_genre(movies_data)
+            m_data = response.json()
+            genre = get_genre(m_data)
             id = await get_tmdb_genre_from_name(genre)
             if id == -1:
                 return {"warning": "No movies to recommend for: " + genre}
             else:
-                movies_reco = await get_tmdb_recomendations(id, "movie")
+                m_data = await get_tmdb_recomendations(id, "movie")
                 movies = [Media(str(m["original_title"]), 
-                                str(m["overview"]), 
+                                str(get_overview(m)), 
                                 str(m["vote_average"]), 
                                 str("N/A"), 
                                 str(TMDB_POSTER_URL + m["poster_path"]), 
                                 str(m["release_date"][:4]),
-                                watched=False).to_dict() for m in movies_reco]
+                                watched=False).to_dict() for m in m_data]
                 if not movies:
                     return {"warning": "No movies to recommend for: " + genre}
                 return movies
@@ -185,27 +169,148 @@ async def discover_radarr_movies():
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/gettv-reco") # TODO: Fix the issue where no recommendations are found for tv
-async def discover_sonarr_movies():
+@app.get("/searchmovies") # curl -X GET "http://localhost:3000/searchmovies?query=Avengers"
+async def search_radarr_movies(query: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": RADARR_KEY}
+            params = {"term": query}
+            response = await client.get(f"{RADARR_URL}/movie/lookup", 
+                                        headers=head, params=params)
+            response.raise_for_status()
+            m_data = response.json()
+            movies = [Media(str(get_title(m)),
+                            str(get_overview(m)),
+                            str(get_rating(m["ratings"])),
+                            str(get_runtime(m["runtime"])),
+                            str(get_poster_url(m["images"])),
+                            str(get_year(m)),
+                            watched=False).to_dict() for m in m_data]
+            if not movies:
+                return {"warning": "No movies found"}
+            return movies
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Route not found"}
+        else:
+            return {"error": str(e)}
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to decode JSON: {str(e)}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/addmovies") # curl -X POST "http://localhost:3000/addmovies?title=Gladiator"
+async def add_radarr_movies(title: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": RADARR_KEY}
+            data = {
+                "title": title,
+                "tmdbId": await get_tmdb_id_from_title(title),
+                "qualityProfileId": 1,
+                "rootFolderPath": "/movie",
+                "monitored": True,
+            }
+            response = await client.post(f"{RADARR_URL}/movie", 
+                                         headers=head, 
+                                         json=data)
+            if response.status_code == 201:
+                return {"success": f"Movie {title} added to watchlist"}
+            else:
+                response.raise_for_status()
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Route not found"}
+        if e.response.status_code == 400:
+            return {"warning": "Movie already in watchlist or invalid title"}
+        else:
+            return {"error": str(e)}
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to decode JSON: {str(e)}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/removemovies") # TODO: TEST WITH curl -X DELETE "http://localhost:3000/removemovies?title=Gladiator"
+async def remove_radar_movies_from_watch_list(title: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": RADARR_KEY}
+            response = await client.get(f"{RADARR_URL}/movie", headers=head)
+            response.raise_for_status()
+            m_data = response.json()
+            movie_id = None
+            for movie in m_data:
+                if get_title(movie).lower() == title.lower():
+                    movie_id = movie["id"] # maybe not "id" to look for ?
+                    break
+            if movie_id is None:
+                return {"warning": "Movie not found"}
+            response = await client.delete(f"{RADARR_URL}/movie/{movie_id}",
+                                           headers=head)
+            response.raise_for_status()
+            return {"success": "Movie removed from watch list"}
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Movie not found"}
+        else:
+            return {"error": str(e)}
+    except Exception as e:
+        return {"error": str(e)}
+
+# *****************************************************************************
+#                  Sonarr routes
+# 
+
+@app.get("/gettv") # curl -X GET "http://localhost:3000/gettv"
+async def get_sonarr_series():
     try:
         async with httpx.AsyncClient() as client:
             head = {"X-Api-Key": SONARR_KEY}
             response = await client.get(f"{SONARR_URL}/series", headers=head)
             response.raise_for_status()
-            series_data = response.json()
-            genre = retrieve_genre(series_data)
+            s_data = response.json()
+            series = [Media(str(get_title(s)), 
+                            str(get_overview(s)), 
+                            str(get_rating(s["ratings"])), 
+                            str(s["statistics"]["episodeCount"]),
+                            str(get_poster_url(s["images"])), 
+                            str(get_year(s))
+                        ).to_dict() for s in s_data]
+            if not series:
+                return {"warning": "No series found"}
+            return series
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Route not found"}
+        else:
+            return {"error": str(e)}
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to decode JSON: {str(e)}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+# TODO: Fix the issue where no recommendations are found for tv
+@app.get("/recotv") # curl -X GET "http://localhost:3000/recotv"
+async def discover_sonarr_series():
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": SONARR_KEY}
+            response = await client.get(f"{SONARR_URL}/series", headers=head)
+            response.raise_for_status()
+            s_data = response.json()
+            genre = get_genre(s_data)
             id = await get_tmdb_genre_from_name(genre)
             if id == -1:
                 return {"warning": "No series to recommend for: " + genre}
             else:
-                series_reco = await get_tmdb_recomendations(id, "tv")
+                s_data = await get_tmdb_recomendations(id, "tv")
                 series = [Media(str(s["original_title"]), 
-                                str(s["overview"]), 
+                                str(get_overview(s)), 
                                 str(s["vote_average"]), 
                                 str("N/A"), 
                                 str(TMDB_POSTER_URL + s["poster_path"]), 
                                 str(s["release_date"][:4]),
-                                watched=False).to_dict() for s in series_reco]
+                                watched=False).to_dict() for s in s_data]
                 if not series:
                     return {"warning": "No series to recommend for: " + genre}
                 return series
@@ -219,36 +324,214 @@ async def discover_sonarr_movies():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/searchtv") # curl -X GET "http://localhost:3000/searchtv?query=Breaking_Bad"
+async def search_sonarr_series(query: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": SONARR_KEY}
+            params = {"term": query}
+            response = await client.get(f"{SONARR_URL}/series/lookup", 
+                                        headers=head, params=params)
+            response.raise_for_status()
+            s_data = response.json()            
+            series = [Media(str(get_title(s)),
+                           str(get_overview(s)),
+                           str(get_rating(s["ratings"])),
+                           str(s["statistics"]["episodeCount"]),
+                           str(get_poster_url(s["images"])),
+                           str(get_year(s)),
+                           watched=False).to_dict() for s in s_data]
+            if not series:
+                return {"warning": "No series found"}
+            return series
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Route not found"}
+        else:
+            return {"error": str(e)}
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to decode JSON: {str(e)}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/addtv")  # curl -X POST "http://localhost:3000/addtv?title=Friends"
+async def add_sonarr_series(title: str, year: int):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": SONARR_KEY}
+            data = {
+                "title": title,
+                "tvdbId": await get_tvdb_id_from_title(title),
+                "qualityProfileId": 1,
+                "rootFolderPath": "/tv",
+                "monitored": True,
+                "seasonFolder": True,
+                "addOptions": {
+                    "ignoreEpisodesWithFiles": False,
+                    "ignoreEpisodesWithoutFiles": False,
+                    "searchForMissingEpisodes": True,
+                },
+                "images": [],
+                "seasons": [],
+                "path": "/tv/" + title,
+                "seriesType": "standard",
+                "network": "",
+                "genre": [],
+                "profileId": 1,
+                "languageProfileId": 1,
+                "runtime": 0,
+            }
+            response = await client.post(f"{SONARR_URL}/series", 
+                                         headers=head, 
+                                         json=data)
+            if response.status_code == 201:
+                return {"success": f"Serie {title} added to watchlist"}
+            else:
+                response.raise_for_status()
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Route not found"}
+        if e.response.status_code == 400:
+            return {"warning": "Serie already in watchlist or invalid title"}
+        else:
+            return {"error": str(e)}
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to decode JSON: {str(e)}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/removeseries") # TODO: TEST WITH curl -X DELETE "http://localhost:3000/removeseries?title=Friends"
+async def remove_sonarr_series_from_watch_list(title: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"X-Api-Key": SONARR_KEY}
+            response = await client.get(f"{SONARR_URL}/series", headers=head)
+            response.raise_for_status()
+            s_data = response.json()
+            serie_id = None
+            for serie in s_data:
+                if get_title(serie).lower() == title.lower():
+                    serie_id = serie["id"] # maybe not "id" to look for ?
+                    break
+            if serie_id is None:
+                return {"warning": "Serie not found"}
+            response = await client.delete(f"{SONARR_URL}/series/{serie_id}",
+                                           headers=head)
+            response.raise_for_status()
+            return {"success": "Serie removed from watch list"}
+    except httpx.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"warning": "Serie not found"}
+        else:
+            return {"error": str(e)}
+    except Exception as e:
+        return {"error": str(e)}
+
+# *****************************************************************************
+#                  Deluge routes
+# 
+
+@app.get("/gettorrents")
+async def get_torrents():
+    torrent_ids = await deluge_rpc("web.update_ui", [["id"], {}])
+    torrent_lst = [{"id": torrent_id} for torrent_id in torrent_ids]
+    torrents = await deluge_rpc("web.get_torrents_status", [torrent_lst, {}])
+    return torrents
+
+@app.get("/torrents/{torrent_id}/pause")
+async def pause_torrent(torrent_id: str):
+    result = await deluge_rpc("core.pause_torrent", [[torrent_id]])
+    if not result:
+        raise Exception("Failed to pause torrent")
+    return {"status": "success"}
+
+@app.get("/torrents/{torrent_id}/delete")
+async def delete_torrent(torrent_id: str):
+    # Remove with data = False. Change it to True if you want to remove data as well.
+    result = await deluge_rpc("core.remove_torrent", [torrent_id, False])  
+    if not result:
+        raise Exception("Failed to delete torrent")
+    return {"status": "success"}
+
+@app.post("/torrents")
+async def add_torrent(magnet_link: str):
+    result = await deluge_rpc("core.add_torrent_magnet", [magnet_link, {}])
+    if not result:
+        raise HTTPException(status_code=400, detail="Failed to add torrent")
+    return {"status": "success", "torrent_id": result}
+
+# *****************************************************************************
+#                  Jackett routes
+# 
+
+@app.get("/jackett/trackers")
+async def get_trackers():
+    data = await jackett_rpc(JACKETT_API_URL)
+    return [tracker['id'] for tracker in data]
+
+
 # *****************************************************************************
 #                  Utility functions
 # *****************************************************************************
 
-def convert_runtime(min: str):
+def get_runtime(min: str):
     try:
         min = int(min)
         hours = min // 60
         minutes = min % 60
         return f"{hours}h {minutes}m"
     except:
-        logger.error("Failed to convert runtime")
         return min
 
-def retrieve_poster_url(images: list):
+def get_poster_url(images: list):
     for image in images:
         if image["coverType"] == "poster":
             return image["remoteUrl"]
-    logger.error("No poster found")
     return None
 
-def retrieve_genre(movies: list):
+def get_genre(medias: list):
     genres = {}
-    for movie in movies:
-        for genre in movie["genres"]:
+    for m in medias:
+        for genre in m["genres"]:
             if genre in genres:
                 genres[genre] += 1
             else:
                 genres[genre] = 1
     return max(genres, key=genres.get)
+
+def get_rating(ratings: dict):
+    if isinstance(ratings, dict):
+        if "value" in ratings and isinstance(ratings["value"], float):
+            return ratings["value"]
+        else:
+            for value in ratings.values():
+                result = get_rating(value)
+                if result is not None:
+                    return result
+    elif isinstance(ratings, list):
+        for item in ratings:
+            result = get_rating(item)
+            if result is not None:
+                return result
+    return None
+
+def get_title(media: dict):
+    if "title" in media and isinstance(media["title"], str):
+        return media["title"]
+    else:
+        return "No title found"
+
+def get_year(media: dict):
+    if "year" in media and isinstance(media["year"], str):
+        return media["yeat"]
+    else:
+        return "No year found"
+
+def get_overview(media: dict):
+    if "overview" in media and isinstance(media["overview"], str):
+        return media["overview"]
+    else:
+        return "No overview found"
 
 async def get_tmdb_genre_from_name(genre_name):
     try:
@@ -277,7 +560,8 @@ async def get_tmdb_recomendations(genre_id, type):
             "accept": "application/json"}
             params = {"with_genres": genre_id,
                       "language": "en",
-                      "page": 2}
+                      "page": 2,
+                      "sort_by": "popularity.desc"}
             response = await client.get(f"{TMDB_URL}/discover/{type}", 
                                         headers=head, params=params)
             response.raise_for_status()
@@ -286,25 +570,73 @@ async def get_tmdb_recomendations(genre_id, type):
         logger.error(e)
         return -1
     
+async def get_tmdb_id_from_title(title: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            url = f"https://api.themoviedb.org/3/search/movie"
+            head = {"Authorization": "Bearer " + TMDB_KEY,
+                    "accept": "application/json"}
+            params = {"query": title, "language": "en"}
+            response = await client.get(url, headers=head, params=params)
+            response.raise_for_status()
+            results = response.json()["results"]
+            if results:
+                return results[0]["id"]
+            else:
+                logger.error("No results found for " + title)
+                return ""
+    except Exception as e:
+        logger.error(e)
+        return {"error": str(e)}
+
+async def get_tvdb_id_from_title(title: str):
+   # TODO: Get the TVDB ID from the title
+   TVDB_KEY = "2e9b77b6-cabf-4a62-8a6d-8e9b68c9601c"
+   pass
+   
+async def deluge_rpc(method, params=None):
+    if params is None:
+        params = [] 
+    payload = {
+        "id": 1,
+        "method": method,
+        "params": params
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(DELUGE_URL, 
+                                headers= {"Content-Type": "application/json"}, 
+                                data=json.dumps(payload)) as resp:
+            data = await resp.json()
+            if "result" in data:
+                return data["result"]
+            elif "error" in data:
+                raise Exception(f"Deluge RPC Error: {data['error']['message']}")
+    return None
+
+async def jackett_rpc(url: str) -> Dict[str, Any]:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            return await response.json()
+
 # Routes Films
  # OK - Get la liste des films watched
  # OK - Get la liste des films recommandés
- # - Get la liste de résultat d'une recherche de films
- # - Ajouter un film à la liste des watch
- # - Retirer un film de la liste des watch
+ # OK - Get la liste de résultat d'une recherche de films
+ # OK - Ajouter un film à la liste des watch
+ # TESTER - Retirer un film de la liste des watch
 
 # Routes Series
  # OK - Get la liste des séries watched
- # PRESQUE - Get la liste des séries recommandés
- # - Get la liste de résultat d'une recherche de séries 
- # - Ajouter une séries à la liste des watch
- # - Retirer une séries de la liste des watch
+ # MARCHE PAS - Get la liste des séries recommandés
+ # OK - Get la liste de résultat d'une recherche de séries 
+ # PRESQUE - Ajouter une séries à la liste des watch
+ # TESTER - Retirer une séries de la liste des watch
 
 # Route deluge
- # - Get les torrents et leurs états
- # - Modifier l'état d'un torrent (On va dire juste pause, delete)
- # - Ajouter un torrent depuis un lien magnet
+ # TESTER - Get les torrents et leurs états
+ # TESTER - Modifier l'état d'un torrent (On va dire juste pause, delete)
+ # TESTER - Ajouter un torrent depuis un lien magnet
 
-#Route jackett (euh frérot jsp trop?)
- # - Get la liste des trackers
- # - Modifier l'url d'un tracker ?
+# Route jackett
+ # TESTER - Get la liste des trackers
+ # VISIBLEMENT C'EST PAS POSSIBLE - Modifier l'url d'un tracker ?
