@@ -34,8 +34,8 @@ TMDB_POSTER_URL = "https://image.tmdb.org/t/p/original"
 DELUGE_URL = f"http://{LOCAL_IP}:8112/json"
 DELUGE_KEY = os.getenv("DELUGE_KEY")
 
-JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers"
-# f"http://{LOCAL_IP}:9117/api/v2.0/indexers/all/results/torznab" ??
+#JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers"
+JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers/all/results/torznab"
 JACKETT_KEY = os.getenv("JACKETT_KEY")
 
 # *****************************************************************************
@@ -96,9 +96,9 @@ class Media:
 
 @app.on_event("startup")
 async def startup_event():
-    result = await deluge_rpc("auth.login", DELUGE_KEY)
+    result = await deluge_rpc("auth.login", [DELUGE_KEY])
     if not result:
-        raise Exception("Failed to authenticate to Deluge server")
+        raise Exception("Failed to authenticate to Deluge server: " + result)
 
 @app.get("/")
 def info():
@@ -107,11 +107,6 @@ def info():
 # *****************************************************************************
 #                  Radarr routes
 #
-#   - Get la liste des films watched                        OK
-#   - Get la liste des films recommandés                    OK
-#   - Get la liste de résultat d'une recherche de films     OK
-#   - Ajouter un film à la liste des watch                  OK
-#   - Retirer un film de la liste des watch                 TEST
 
 # curl -X GET "http://localhost:3000/getmovies"
 @app.get("/getmovies")
@@ -151,21 +146,17 @@ async def discover_radarr_movies():
             response.raise_for_status()
             m_data = response.json()
             genre = get_genre(m_data)
-            id = await get_tmdb_genre_from_name(genre)
-            if id == -1:
+            m_data = await get_tmdb_recomendations(genre, "movie")
+            movies = [Media(str(m["original_title"]), 
+                            str(get_overview(m)), 
+                            str(m["vote_average"]), 
+                            str("N/A"), 
+                            str(TMDB_POSTER_URL + m["poster_path"]), 
+                            str(m["release_date"][:4]),
+                            watched=False).to_dict() for m in m_data]
+            if not movies:
                 return {"warning": "No movies to recommend for: " + genre}
-            else:
-                m_data = await get_tmdb_recomendations(id, "movie")
-                movies = [Media(str(m["original_title"]), 
-                                str(get_overview(m)), 
-                                str(m["vote_average"]), 
-                                str("N/A"), 
-                                str(TMDB_POSTER_URL + m["poster_path"]), 
-                                str(m["release_date"][:4]),
-                                watched=False).to_dict() for m in m_data]
-                if not movies:
-                    return {"warning": "No movies to recommend for: " + genre}
-                return movies
+            return movies
     except httpx.HTTPError as e:
         if e.response.status_code == 404:
             return {"warning": "Route not found"}
@@ -176,7 +167,7 @@ async def discover_radarr_movies():
     except Exception as e:
         return {"error": str(e)}
 
-# curl -X GET -d '{"title":"Avengers"}' "http://localhost:3000/searchmovies"
+# curl -X GET "http://localhost:3000/searchmovies?title=Avengers"
 @app.get("/searchmovies")
 async def search_radarr_movies(title: str):
     try:
@@ -207,7 +198,7 @@ async def search_radarr_movies(title: str):
     except Exception as e:
         return {"error": str(e)}
 
-# curl -X POST -d '{"title":"Gladiator"}' "http://localhost:3000/addmovies"
+# curl -X POST "http://localhost:3000/addmovies?title=Gladiator"
 @app.post("/addmovies")
 async def add_radarr_movies(title: str):
     try:
@@ -215,7 +206,7 @@ async def add_radarr_movies(title: str):
             head = {"X-Api-Key": RADARR_KEY}
             data = {
                 "title": title,
-                "tmdbId": await get_tmdb_id_from_title(title),
+                "tmdbId": await get_tmdb_id_from_title(title, type="movie"),
                 "qualityProfileId": 1,
                 "rootFolderPath": "/movie",
                 "monitored": True,
@@ -239,7 +230,7 @@ async def add_radarr_movies(title: str):
     except Exception as e:
         return {"error": str(e)}
 
-# TODO: TEST WITH curl -X DELETE -d '{"title":"Gladiator"}' "http://localhost:3000/removemovies"
+# curl -X DELETE "http://localhost:3000/removemovies?title=Gladiator"
 @app.delete("/removemovies")
 async def remove_radar_movies_from_watch_list(title: str):
     try:
@@ -270,11 +261,6 @@ async def remove_radar_movies_from_watch_list(title: str):
 # *****************************************************************************
 #                  Sonarr routes
 # 
-#   - Get la liste des séries watched                       OK
-#   - Get la liste des séries recommandés                   NOK
-#   - Get la liste de résultat d'une recherche de séries    OK
-#   - Ajouter une séries à la liste des watch               ALMOST
-#   - Retirer une séries de la liste des watch              TEST
 
 # curl -X GET "http://localhost:3000/gettv"
 @app.get("/gettv")
@@ -305,7 +291,6 @@ async def get_sonarr_series():
     except Exception as e:
         return {"error": str(e)}
 
-# TODO: Fix the issue where no recommendations are found for tv
 # curl -X GET "http://localhost:3000/recotv"
 @app.get("/recotv")
 async def discover_sonarr_series():
@@ -316,21 +301,17 @@ async def discover_sonarr_series():
             response.raise_for_status()
             s_data = response.json()
             genre = get_genre(s_data)
-            id = await get_tmdb_genre_from_name(genre)
-            if id == -1:
+            s_data = await get_tmdb_recomendations(genre, "tv")
+            series = [Media(str(s["original_name"]), 
+                            str(get_overview(s)), 
+                            str(s["vote_average"]), 
+                            str("N/A"), 
+                            str(TMDB_POSTER_URL + s["poster_path"]), 
+                            str(s["first_air_date"][:4]),
+                            watched=False).to_dict() for s in s_data]
+            if not series:
                 return {"warning": "No series to recommend for: " + genre}
-            else:
-                s_data = await get_tmdb_recomendations(id, "tv")
-                series = [Media(str(s["original_title"]), 
-                                str(get_overview(s)), 
-                                str(s["vote_average"]), 
-                                str("N/A"), 
-                                str(TMDB_POSTER_URL + s["poster_path"]), 
-                                str(s["release_date"][:4]),
-                                watched=False).to_dict() for s in s_data]
-                if not series:
-                    return {"warning": "No series to recommend for: " + genre}
-                return series
+            return series
     except httpx.HTTPError as e:
         if e.response.status_code == 404:
             return {"warning": "Route not found"}
@@ -341,7 +322,7 @@ async def discover_sonarr_series():
     except Exception as e:
         return {"error": str(e)}
 
-# curl -X GET -d '{"title":"Breaking Bad"}' "http://localhost:3000/searchtv"
+# curl -X GET "http://localhost:3000/searchtv?title=Breaking%20Bad"
 @app.get("/searchtv")
 async def search_sonarr_series(title: str):
     try:
@@ -351,7 +332,7 @@ async def search_sonarr_series(title: str):
             response = await client.get(f"{SONARR_URL}/series/lookup", 
                                         headers=head, params=params)
             response.raise_for_status()
-            s_data = response.json()            
+            s_data = response.json()         
             series = [Media(str(get_title(s)),
                            str(get_overview(s)),
                            str(get_rating(s["ratings"])),
@@ -373,15 +354,17 @@ async def search_sonarr_series(title: str):
         return {"error": str(e)}
     pass
 
-# curl -X POST -d '{"title":"Friends"}' "http://localhost:3000/addtv"
+# curl -X POST "http://localhost:3000/addtv?title=Breaking%20Bad"
 @app.post("/addtv") 
-async def add_sonarr_series(title: str, year: int):
+async def add_sonarr_series(title: str):
+    id = await get_tmdb_id_from_title(title, type="tv")
+    tvdb_id = await convert_tmdb_id_to_tvdb_id(id)
     try:
         async with httpx.AsyncClient() as client:
             head = {"X-Api-Key": SONARR_KEY}
             data = {
                 "title": title,
-                "tvdbId": await get_tvdb_id_from_title(title),
+                "tvdbId": tvdb_id,
                 "qualityProfileId": 1,
                 "rootFolderPath": "/tv",
                 "monitored": True,
@@ -391,15 +374,7 @@ async def add_sonarr_series(title: str, year: int):
                     "ignoreEpisodesWithoutFiles": False,
                     "searchForMissingEpisodes": True,
                 },
-                "images": [],
-                "seasons": [],
-                "path": "/tv/" + title,
-                "seriesType": "standard",
-                "network": "",
-                "genre": [],
-                "profileId": 1,
                 "languageProfileId": 1,
-                "runtime": 0,
             }
             response = await client.post(f"{SONARR_URL}/series", 
                                          headers=head, 
@@ -420,7 +395,7 @@ async def add_sonarr_series(title: str, year: int):
     except Exception as e:
         return {"error": str(e)}
 
-# TODO: TEST WITH curl -X DELETE -d '{"title":"Friends"}' http://localhost:8000/removeseries
+# TODO: TEST WITH curl -X DELETE "http://localhost:3000/removeseries?title=Breaking%20Bad"
 @app.delete("/removeseries")
 async def remove_sonarr_series_from_watch_list(title: str):
     try:
@@ -455,15 +430,19 @@ async def remove_sonarr_series_from_watch_list(title: str):
 #   - Modifier l'état d'un torrent ( pause, delete)         TEST
 #   - Ajouter un torrent depuis un lien magnet              TEST
 
-# TODO: TEST WITH curl -X GET http://localhost:8000/gettorrents
+# TODO: TEST WITH curl -X GET "http://localhost:3000/gettorrents"
 @app.get("/gettorrents")
 async def get_deluge_torrents():
     torrent_ids = await deluge_rpc("web.update_ui", [["id"], {}])
+    print(torrent_ids)
+    if torrent_ids is None:
+        raise Exception("Failed to retrieve torrent IDs")
+    
     torrent_lst = [{"id": torrent_id} for torrent_id in torrent_ids]
     torrents = await deluge_rpc("web.get_torrents_status", [torrent_lst, {}])
     return torrents
 
-# TODO: TEST WITH curl -X GET http://localhost:8000/gettrackers
+# TODO: TEST WITH curl -X GET "http://localhost:3000/gettrackers"
 @app.get("/pausetorrents/{torrent_id}")
 async def pause_deluge_torrent(torrent_id: str):
     result = await deluge_rpc("core.pause_torrent", [[torrent_id]])
@@ -471,7 +450,7 @@ async def pause_deluge_torrent(torrent_id: str):
         raise Exception("Failed to pause torrent")
     return {"status": "success"}
 
-# TODO: TEST WITH curl -X DELETE -d '{"torrent_id":"..."}' http://localhost:8000/removetorrents
+# TODO: TEST WITH curl -X DELETE "http://localhost:3000/removetorrents?torrent_id=..."
 @app.delete("/removetorrents")
 async def delete_deluge_torrent(torrent_id: str):
     # Remove with data = False. Change it to True to remove data as well.
@@ -480,7 +459,7 @@ async def delete_deluge_torrent(torrent_id: str):
         raise HTTPException(status_code=400, detail="Failed to delete torrent")
     return {"status": "success"}
 
-# TODO: TEST WITH curl -X GET http://localhost:8000/gettrackers
+# TODO: TEST WITH curl -X GET "http://localhost:3000/addtorrents?magnet_link=..."
 @app.post("/addtorrents")
 async def add_deluge_torrent(magnet_link: str):
     result = await deluge_rpc("core.add_torrent_magnet", [magnet_link, {}])
@@ -494,7 +473,7 @@ async def add_deluge_torrent(magnet_link: str):
 #   - Get la liste des trackers                             TEST
 #   - Modifier l'url d'un tracker                           IMPOSSIBLE
 
-# TODO: TEST WITH curl -X GET http://localhost:8000/gettrackers
+# TODO: TEST WITH curl -X GET "http://localhost:3000/gettrackers"
 @app.get("/gettrackers")
 async def get_jackett_trackers():
     data = await jackett_rpc(JACKETT_API_URL, JACKETT_KEY)
@@ -563,35 +542,18 @@ def get_overview(media: dict):
     else:
         return "No overview found"
 
-async def get_tmdb_genre_from_name(genre_name):
+async def get_tmdb_recomendations(genre, type):
     try:
         async with httpx.AsyncClient() as client:
             head = {"Authorization": "Bearer " + TMDB_KEY,
             "accept": "application/json"}
-            params = {"language": "en"}
-            response = await client.get(f"{TMDB_URL}/genre/movie/list",
-                                        headers=head, params=params)
-            response.raise_for_status()
-            
-            genres = response.json()["genres"]
-            for genre in genres:
-                if genre["name"].lower() == genre_name.lower():
-                    return genre["id"]
-            return -1
-    except Exception as e:
-        logger.error(e)
-        return -1
-    
-async def get_tmdb_recomendations(genre_id, type):
-    try:
-        async with httpx.AsyncClient() as client:
-            url = f"https://api.themoviedb.org/3/discover/{type}"
-            head = {"Authorization": "Bearer " + TMDB_KEY,
-            "accept": "application/json"}
-            params = {"with_genres": genre_id,
-                      "language": "en",
-                      "page": 2,
-                      "sort_by": "popularity.desc"}
+            params = {"with_genres": genre,
+                      "language": "en-US",
+                      "page": 10,
+                      "sort_by": "vote_count.desc",
+                      "include_adult": "true",
+                      "include_null_first_air_dates": "false"
+                      }
             response = await client.get(f"{TMDB_URL}/discover/{type}", 
                                         headers=head, params=params)
             response.raise_for_status()
@@ -600,14 +562,15 @@ async def get_tmdb_recomendations(genre_id, type):
         logger.error(e)
         return -1
     
-async def get_tmdb_id_from_title(title: str):
+async def get_tmdb_id_from_title(title: str, type: str):
     try:
         async with httpx.AsyncClient() as client:
-            url = f"https://api.themoviedb.org/3/search/movie"
             head = {"Authorization": "Bearer " + TMDB_KEY,
                     "accept": "application/json"}
             params = {"query": title, "language": "en"}
-            response = await client.get(url, headers=head, params=params)
+            response = await client.get(f"{TMDB_URL}/search/{type}",
+                                        headers=head,
+                                        params=params)
             response.raise_for_status()
             results = response.json()["results"]
             if results:
@@ -618,12 +581,25 @@ async def get_tmdb_id_from_title(title: str):
     except Exception as e:
         logger.error(e)
         return {"error": str(e)}
-
-async def get_tvdb_id_from_title(title: str):
-   # TODO: Get the TVDB ID from the title
-   TVDB_KEY = "2e9b77b6-cabf-4a62-8a6d-8e9b68c9601c"
-   pass
-   
+  
+async def convert_tmdb_id_to_tvdb_id(id: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            head = {"Authorization": "Bearer " + TMDB_KEY,
+                    "accept": "application/json"}
+            response = await client.get(f"{TMDB_URL}/tv/{id}/external_ids",
+                                        headers=head)
+            response.raise_for_status()
+            results = response.json()
+            if results:
+                return results["tvdb_id"]
+            else:
+                logger.error("No results found for id: " + id)
+                return ""
+    except Exception as e:
+        logger.error(e)
+        return {"error": str(e)}
+    
 async def deluge_rpc(method, params=None):
     if params is None:
         params = [] 
@@ -639,7 +615,7 @@ async def deluge_rpc(method, params=None):
             data = await resp.json()
             if "result" in data:
                 return data["result"]
-            elif "error" in data:
+            else:
                 raise Exception(f"Deluge RPC Error: {data['error']['message']}")
     return None
 
