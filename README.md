@@ -26,17 +26,17 @@ The OpenAPI specifications are available under the route `/specification` and th
 
 ### Note for the API Keys
 
-In order to use the API, you need to have several valid API keys. Use your own or ask for the script `export-keys.sh` to get the keys we used for the project.
+In order to use the API, you need to have several valid API keys. Use your own or ask for the script `export-keys.sh` to get the keys we used for our specific implementation.
 
 ## Build and run the project with docker
 
-- Build the docker image
+- Build the docker image:
 
 ```sh
   docker build -t riverr-backend .
 ```
 
-- Run the docker image
+- Run the docker image:
 
 ```sh
   docker run -d -p 3000:3000 riverr-backend

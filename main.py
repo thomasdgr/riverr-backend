@@ -1,10 +1,11 @@
 import os
 import json
 import httpx
-import aiohttp
+import requests
 import logging
-
+import deluge_client
 from typing import Any, Dict
+from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.utils import get_openapi
 from starlette.middleware.cors import CORSMiddleware
@@ -31,11 +32,10 @@ TMDB_URL = "https://api.themoviedb.org/3"
 TMDB_KEY = os.getenv("TMDB_KEY")
 TMDB_POSTER_URL = "https://image.tmdb.org/t/p/original"
 
-DELUGE_URL = f"http://{LOCAL_IP}:8112/json"
+DELUGE_PORT = 58846
 DELUGE_KEY = os.getenv("DELUGE_KEY")
 
-#JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers"
-JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers/all/results/torznab"
+JACKETT_API_URL = f"http://{LOCAL_IP}:9117/api/v2.0/indexers"
 JACKETT_KEY = os.getenv("JACKETT_KEY")
 
 # *****************************************************************************
@@ -70,7 +70,7 @@ logger.info('Starting app with URL_PREFIX=' + URL_PREFIX)
 # *****************************************************************************
 
 class Media:
-    def __init__(self, name, synopsis, rating, length, thumbnail, year, watched=True):
+    def __init__(self,name,synopsis,rating,length,thumbnail,year,watched=True):
         self.name = name
         self.synopsis = synopsis 
         self.rating = rating
@@ -90,15 +90,28 @@ class Media:
             "year": self.year,
         }
 
+class TrackerUpdate(BaseModel):
+    url: str
+    tracker_id: str
+
 # *****************************************************************************
 #                  Routes of the API
 # *****************************************************************************
 
+client = None
+
 @app.on_event("startup")
 async def startup_event():
-    result = await deluge_rpc("auth.login", [DELUGE_KEY])
-    if not result:
-        raise Exception("Failed to authenticate to Deluge server: " + result)
+    global client
+    client = deluge_client.DelugeRPCClient(LOCAL_IP, 
+                                           DELUGE_PORT, 
+                                           'localclient', 
+                                            DELUGE_KEY)
+    client.connect()
+    if client.connected:
+        logger.info('Connected to Deluge')
+    else:
+        logger.info('Failed to connect to Deluge')
 
 @app.get("/")
 def info():
@@ -260,7 +273,7 @@ async def remove_radar_movies_from_watch_list(title: str):
 
 # *****************************************************************************
 #                  Sonarr routes
-# 
+#
 
 # curl -X GET "http://localhost:3000/gettv"
 @app.get("/gettv")
@@ -395,7 +408,7 @@ async def add_sonarr_series(title: str):
     except Exception as e:
         return {"error": str(e)}
 
-# TODO: TEST WITH curl -X DELETE "http://localhost:3000/removeseries?title=Breaking%20Bad"
+# curl -X DELETE "http://localhost:3000/removeseries?title=Breaking%20Bad"
 @app.delete("/removeseries")
 async def remove_sonarr_series_from_watch_list(title: str):
     try:
@@ -425,59 +438,103 @@ async def remove_sonarr_series_from_watch_list(title: str):
 
 # *****************************************************************************
 #                  Deluge routes
-# 
-#   - Get les torrents et leurs états                       TEST
-#   - Modifier l'état d'un torrent ( pause, delete)         TEST
-#   - Ajouter un torrent depuis un lien magnet              TEST
+#
 
-# TODO: TEST WITH curl -X GET "http://localhost:3000/gettorrents"
+# curl -X GET "http://localhost:3000/gettorrents"
 @app.get("/gettorrents")
 async def get_deluge_torrents():
-    torrent_ids = await deluge_rpc("web.update_ui", [["id"], {}])
-    print(torrent_ids)
-    if torrent_ids is None:
-        raise Exception("Failed to retrieve torrent IDs")
-    
-    torrent_lst = [{"id": torrent_id} for torrent_id in torrent_ids]
-    torrents = await deluge_rpc("web.get_torrents_status", [torrent_lst, {}])
-    return torrents
+    if client.connected:
+        torrents = client.call('core.get_torrents_status', 
+                               {}, 
+                               ['name', 
+                                'state', 
+                                'download_payload_rate', 
+                                'upload_payload_rate', 
+                                'progress'])
+        torrent_list = []
+        for torrent_id, torrent_info in torrents.items():
+            name = torrent_info[b'name'].decode('utf-8')
+            state = torrent_info[b'state'].decode('utf-8')
+            download_speed = torrent_info[b'download_payload_rate']
+            upload_speed = torrent_info[b'upload_payload_rate']
+            progress = torrent_info[b'progress']
 
-# TODO: TEST WITH curl -X GET "http://localhost:3000/gettrackers"
-@app.get("/pausetorrents/{torrent_id}")
+            torrent_data = {
+                'torrent_id': torrent_id.decode('utf-8'),
+                'name': name,
+                'state': state,
+                'download_speed': download_speed,
+                'upload_speed': upload_speed,
+                'progress': progress * 100
+            }
+            torrent_list.append(torrent_data)
+        return torrent_list
+    else:
+        logger.error('Deluge not connected')
+
+# curl -X GET "http://localhost:3000/pausetorrents?torrent_id=57e3303a91053e1ecf66e63e1b445caf79da1412"
+@app.get("/pausetorrents")
 async def pause_deluge_torrent(torrent_id: str):
-    result = await deluge_rpc("core.pause_torrent", [[torrent_id]])
-    if not result:
-        raise Exception("Failed to pause torrent")
-    return {"status": "success"}
+    if client.connected:
+        client.call('core.pause_torrent', torrent_id)
+        return {"message": "Torrent paused successfully"}
+    else:
+        return {"message": "Deluge not connected"}
 
-# TODO: TEST WITH curl -X DELETE "http://localhost:3000/removetorrents?torrent_id=..."
+# curl -X DELETE "http://localhost:3000/removetorrents?torrent_id=57e3303a91053e1ecf66e63e1b445caf79da1412"
 @app.delete("/removetorrents")
 async def delete_deluge_torrent(torrent_id: str):
     # Remove with data = False. Change it to True to remove data as well.
-    result = await deluge_rpc("core.remove_torrent", [torrent_id, False])  
-    if not result:
-        raise HTTPException(status_code=400, detail="Failed to delete torrent")
-    return {"status": "success"}
+    if client.connected:
+        client.call('core.remove_torrent', torrent_id, False)
+        return {"message": "Torrent deleted successfully"}
+    else:
+        return {"message": "Deluge not connected"}
 
-# TODO: TEST WITH curl -X GET "http://localhost:3000/addtorrents?magnet_link=..."
+# curl -X GET "http://localhost:3000/addtorrents?magnet_link=..."
 @app.post("/addtorrents")
 async def add_deluge_torrent(magnet_link: str):
-    result = await deluge_rpc("core.add_torrent_magnet", [magnet_link, {}])
-    if not result:
-        raise HTTPException(status_code=400, detail="Failed to add torrent")
-    return {"status": "success", "torrent_id": result}
+    if client.connected:
+        result = client.call('core.add_torrent_magnet', magnet_link, {})
+        if result:
+            return {"message": "Torrent added successfully"}
+        else:
+            return {"message": "Failed to add torrent"}
+    else:
+        return {"message": "Deluge not connected"}
 
 # *****************************************************************************
 #                  Jackett routes
-#  
-#   - Get la liste des trackers                             TEST
-#   - Modifier l'url d'un tracker                           IMPOSSIBLE
+#
 
-# TODO: TEST WITH curl -X GET "http://localhost:3000/gettrackers"
+# curl -X GET "http://localhost:3000/gettrackers"
 @app.get("/gettrackers")
 async def get_jackett_trackers():
-    data = await jackett_rpc(JACKETT_API_URL, JACKETT_KEY)
-    return [tracker['id'] for tracker in data]
+    headers = {'User-Agent': 'Mozilla/5.0', 'X-Api-Key': JACKETT_KEY}
+    res = requests.get(JACKETT_API_URL, headers=headers)
+    if res.status_code == 200:
+        indexers = res.json()
+        indexers = [{'name': idx['name'], 
+                     'url': idx['site_link'], 
+                     'id': idx['id']} for idx in indexers if idx['configured']]
+        return indexers
+    else:
+        return {"message": f"Failed to retrieve indexers: {res.status_code}"}
+
+# curl -X POST "http://localhost:3000/updatetrackerurl?url=...?tracker_id=..."
+@app.put("/updatetrackerurl")
+async def update_jackett_trackers(tracker_update: TrackerUpdate):
+    headers = {'User-Agent': 'Mozilla/5.0', 'X-Api-Key': JACKETT_KEY}
+    data = {'Url': tracker_update.url}
+    res = requests.put(f"{JACKETT_API_URL}/{tracker_update.tracker_id}", 
+                        headers=headers, 
+                        json=data)
+    # TODO: Find a valid way to update the tracker URL since the API doesn't
+    if res.status_code == 200:
+        return {"message": "Tracker URL modified successfully"}
+    else:
+        # Will always return 405 since the API doesn't support it
+        return {"message": f"Failed to modify tracker URL: {res.status_code}"}
 
 # *****************************************************************************
 #                  Utility functions
@@ -599,31 +656,3 @@ async def convert_tmdb_id_to_tvdb_id(id: str):
     except Exception as e:
         logger.error(e)
         return {"error": str(e)}
-    
-async def deluge_rpc(method, params=None):
-    if params is None:
-        params = [] 
-    payload = {
-        "id": 1,
-        "method": method,
-        "params": params
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(DELUGE_URL, 
-                                headers= {"Content-Type": "application/json"}, 
-                                data=json.dumps(payload)) as resp:
-            data = await resp.json()
-            if "result" in data:
-                return data["result"]
-            else:
-                raise Exception(f"Deluge RPC Error: {data['error']['message']}")
-    return None
-
-async def jackett_rpc(url: str, api_key: str) -> Dict[str, Any]:
-    headers = {"X-Api-Key": api_key}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise HTTPException(status_code=response.status, 
-                                    detail="Failed to fetch data from Jackett")
-            return await response.json()
