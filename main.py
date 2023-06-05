@@ -481,6 +481,15 @@ async def pause_deluge_torrent(torrent_id: str):
     else:
         return {"message": "Deluge not connected"}
 
+# curl -X GET "http://localhost:3000/resumetorrents?torrent_id=57e3303a91053e1ecf66e63e1b445caf79da1412"
+@app.get("/resumetorrents")
+async def resume_deluge_torrent(torrent_id: str):
+    if client.connected:
+        client.call('core.resume_torrent', torrent_id)
+        return {"message": "Torrent resumed successfully"}
+    else:
+        return {"message": "Deluge not connected"}
+
 # curl -X DELETE "http://localhost:3000/removetorrents?torrent_id=57e3303a91053e1ecf66e63e1b445caf79da1412"
 @app.delete("/removetorrents")
 async def delete_deluge_torrent(torrent_id: str):
